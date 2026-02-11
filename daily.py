@@ -1,0 +1,48 @@
+name: AWS Billing Emailer
+
+on:
+
+schedule:
+
+- cron: '0 1 * * *' # รันตอน 8 โมงเช้าเวลาไทยทุกวัน
+
+workflow_dispatch:
+
+
+jobs:
+
+run-report:
+
+runs-on: ubuntu-latest
+
+steps:
+
+- uses: actions/checkout@v3
+
+- name: Set up Python
+
+uses: actions/setup-python@v4
+
+with:
+
+python-version: '3.9'
+
+- name: Install Dependencies
+
+run: pip install boto3
+
+- name: Run Script
+
+env:
+
+AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
+
+AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+
+EMAIL_USER: ${{ secrets.EMAIL_USER }}
+
+EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+
+EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+
+run: python export_and_mail.py
