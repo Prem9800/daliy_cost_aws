@@ -1,0 +1,42 @@
+name: Daily AWS Billing Export
+
+on:
+
+schedule:
+
+- cron: '0 0 * * *' # รันทุกเที่ยงคืน UTC
+
+workflow_dispatch: # กดรันเองแมนนวลได้ด้วย
+
+
+jobs:
+
+build:
+
+runs-on: ubuntu-latest
+
+steps:
+
+- uses: actions/checkout@v3
+
+- name: Set up Python
+
+uses: actions/setup-python@v4
+
+with:
+
+python-version: '3.9'
+
+- name: Install dependencies
+
+run: pip install boto3
+
+- name: Run Script
+
+env:
+
+AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
+
+AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+
+run: python export_cost.py
