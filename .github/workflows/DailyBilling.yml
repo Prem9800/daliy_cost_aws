@@ -27,4 +27,4 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
 
-        run: python \.github\workflows\export_and_mail.py
+        run: ./github/workflows/export_and_mail.py
