@@ -1,86 +1,91 @@
 import boto3
 import csv
-import datetime
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from datetime import datetime, timedelta
 
-# 1. ตั้งค่าและเตรียมวันที่
-today = datetime.date.today()
-yesterday = today - datetime.timedelta(days=1)
+def send_email(file_path, filename):
+    sender = os.getenv('EMAIL_SENDER')
+    password = os.getenv('EMAIL_PASSWORD')
+    receiver = os.getenv('EMAIL_RECEIVER')
 
-# Format วันที่สำหรับชื่อไฟล์และ API (yyyy-MM-dd)
-start_date = yesterday.strftime('%Y-%m-%d')
-end_date = today.strftime('%Y-%m-%d')
-file_date = yesterday.strftime('%Y%m%d')
+    msg = MIMEMultipart()
+    msg['From'] = sender
+    msg['To'] = receiver
+    msg['Subject'] = f"AWS Daily Billing Report (Cost vs Net Cost) - {filename}"
 
-# 2. เชื่อมต่อ AWS Cost Explorer Client
-# ข้อมูล Credential จะถูกดึงจาก Environment Variable โดยอัตโนมัติ
-client = boto3.client('ce', region_name='us-east-1') # Cost Explorer endpoint อยู่ที่ us-east-1 เสมอ
+    body = f"รายงานค่าใช้จ่าย AWS รายวันสำหรับ {filename} (รวมข้อมูล Unblended และ Net Unblended Cost)"
+    msg.attach(MIMEText(body, 'plain'))
 
-# ดึง Account ID (เพื่อใช้ตั้งชื่อไฟล์)
-sts_client = boto3.client('sts')
-account_id = sts_client.get_caller_identity()["Account"]
+    with open(file_path, "rb") as attachment:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(attachment.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f"attachment; filename= {filename}")
+        msg.attach(part)
 
-print(f"Checking cost for Account: {account_id}, Date: {start_date}")
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender, password)
+        server.send_message(msg)
+        server.quit()
+        print("Email sent successfully!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
 
-# 3. ยิง API ดึงข้อมูล
-# เราจะ Group ตาม Service และ UsageType เพื่อให้เห็นรายละเอียด
-try:
+def get_aws_billing():
+    client = boto3.client('ce', region_name='us-east-1')
+    sts = boto3.client('sts')
+    account_id = sts.get_caller_identity().get('Account')
+    
+    yesterday = (datetime.now() - timedelta(1)).strftime('%Y-%m-%d')
+    today = datetime.now().strftime('%Y-%m-%d')
+    file_date = (datetime.now() - timedelta(1)).strftime('%Y%m%d')
+
+    # ดึงทั้ง UnblendedCost (ราคาป้าย) และ NetUnblendedCost (จ่ายจริงหลังหักส่วนลด)
     response = client.get_cost_and_usage(
-        TimePeriod={
-            'Start': start_date,
-            'End': end_date
-        },
+        TimePeriod={'Start': yesterday, 'End': today},
         Granularity='DAILY',
-        Metrics=['UnblendedCost'],
+        Metrics=['UnblendedCost', 'NetUnblendedCost'], 
         GroupBy=[
             {'Type': 'DIMENSION', 'Key': 'SERVICE'},
-            {'Type': 'DIMENSION', 'Key': 'REGION'} 
+            {'Type': 'DIMENSION', 'Key': 'REGION'}
         ]
     )
-except Exception as e:
-    print(f"Error calling AWS API: {e}")
-    exit(1)
 
-# 4. เตรียมข้อมูลสำหรับ CSV
-csv_data = []
-# Header: วันที่, Account ID, cost, currency, location, service name, resource group(N/A), cost type(N/A)
-# หมายเหตุ: API จำกัด GroupBy ได้สูงสุด 2 ตัว ถ้าต้องการมากกว่านี้ต้อง process เพิ่ม
-# ในที่นี้เลือก Service กับ Region เป็นหลัก
-
-results = response['ResultsByTime'][0] # เอาวันแรก (เมื่อวาน)
-report_date = results['TimePeriod']['Start']
-
-for group in results['Groups']:
-    # Keys จะเรียงตาม GroupBy ที่เราส่งไป: [Service, Region]
-    service_name = group['Keys'][0]
-    location = group['Keys'][1]
+    filename = f"{file_date}_{account_id}_dailycost.csv"
     
-    amount = group['Metrics']['UnblendedCost']['Amount']
-    currency = group['Metrics']['UnblendedCost']['Unit']
+    # เพิ่มหัวตารางให้มีทั้งสองค่า
+    header = [
+        'report_date', 'AWS Account ID', 'unblended_cost', 
+        'net_unblended_cost', 'currency', 'location', 
+        'service_name', 'resource_group'
+    ]
+
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        
+        for day in response['ResultsByTime']:
+            date = day['TimePeriod']['Start']
+            for group in day['Groups']:
+                unblended = group['Metrics']['UnblendedCost']['Amount']
+                net_unblended = group['Metrics']['NetUnblendedCost']['Amount']
+                unit = group['Metrics']['UnblendedCost']['Unit']
+                service = group['Keys'][0]
+                region = group['Keys'][1]
+                
+                writer.writerow([
+                    date, account_id, unblended, net_unblended, 
+                    unit, region, service, "Default"
+                ])
     
-    # Filter: ตัดยอดที่เป็น 0 ทิ้งเพื่อประหยัดบรรทัด
-    if float(amount) == 0:
-        continue
+    send_email(filename, filename)
 
-    csv_data.append([
-        report_date,       # report_date
-        account_id,        # AWS Account ID
-        amount,            # cost
-        currency,          # currency
-        location,          # location
-        service_name,      # service name
-        "N/A",             # resource group (ต้องใช้ Tagging ถึงจะดึงได้)
-        "Standard Usage"   # ประเภท cost (ถ้าอยากได้ UsageType ต้องเปลี่ยน GroupBy)
-    ])
-
-# 5. เขียนลงไฟล์ CSV
-filename = f"{file_date}_{account_id}_dailycost.csv"
-
-header = ['report_date', 'AWS Account ID', 'cost', 'currency', 'location', 'service name', 'resource group', 'cost type']
-
-with open(filename, 'w', newline='', encoding='utf-8') as f:
-    writer = csv.writer(f)
-    writer.writerow(header)
-    writer.writerows(csv_data)
-
-print(f"Successfully generated: {filename}")
+if __name__ == "__main__":
+    get_aws_billing()
