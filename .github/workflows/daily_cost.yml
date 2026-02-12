@@ -2,9 +2,8 @@ name: Daily AWS Cost Report
 
 on:
   schedule:
-    # รันทุกวันตอน 01:00 UTC (ประมาณ 08:00 น. เวลาไทย)
     - cron: '0 1 * * *'
-  workflow_dispatch: # ปุ่มสำหรับกดรันเองเพื่อทดสอบ
+  workflow_dispatch: 
 
 jobs:
   get-billing:
@@ -21,23 +20,20 @@ jobs:
 
     - name: Install dependencies
       run: |
-        pip install boto3
+        python -m pip install --upgrade pip
+        pip install boto3 pandas  # ติดตั้ง Library ที่จำเป็นทั้งหมด
 
-    - name: Run Billing Script and Send Email
+    - name: Run Billing Script
       env:
-        # ส่วนของ AWS Credentials
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_DEFAULT_REGION: us-east-1
-        
-        # ส่วนของ Gmail Credentials (ต้องไปตั้งใน GitHub Secrets)
         MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
         MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
       run: python get_cost.py
 
     - name: Upload CSV as Artifact
-      # เก็บไฟล์สำรองไว้บน GitHub Actions ด้วย (เผื่ออีเมลไม่เข้า)
-      if: always() # ให้รันขั้นตอนนี้เสมอแม้สคริปต์ก่อนหน้าจะ error
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: daily-cost-report
