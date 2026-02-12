@@ -37,3 +37,14 @@ jobs:
         name: daily-cost-report
         path: "*.csv"
         retention-days: 14
+
+
+        - name: List files (Debug)
+      run: ls -R
+
+    - name: Run Billing Script
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_DEFAULT_REGION: us-east-1
+      run: python get_cost.py  # <--- ชื่อตรงนี้ ต้องตรงกับไฟล์ในโฟลเดอร์เป๊ะๆ
