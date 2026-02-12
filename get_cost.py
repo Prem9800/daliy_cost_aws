@@ -2,23 +2,71 @@ import boto3
 import pandas as pd
 from datetime import datetime, timedelta
 import os
+import smtplib
+from email.message import EmailMessage
 
 # --- CONFIGURATION ---
 OUTPUT_FOLDER = "." 
-AWS_PROFILE = "default" 
+
+def send_email(file_path, report_date, total_unblended, total_net, currency):
+    # ดึงค่าจาก GitHub Secrets
+    email_user = os.environ.get('MAIL_USERNAME')
+    email_pass = os.environ.get('MAIL_PASSWORD')
+    receiver_email = email_user # ส่งเข้าเมลตัวเอง
+
+    if not email_user or not email_pass:
+        print("Skipping Email: Mail credentials not found.")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = f"📊 AWS Daily Cost: {report_date}"
+    msg['From'] = email_user
+    msg['To'] = receiver_email
+    
+    body = f"""
+    สวัสดีครับ,
+    
+    สรุปรายงานค่าใช้จ่าย AWS ประจำวันที่: {report_date}
+    
+    💰 ยอดรวมก่อนหักส่วนลด (Unblended): {total_unblended:.2f} {currency}
+    ✅ ยอดรวมหลังหักส่วนลด (Net Amortized): {total_net:.2f} {currency}
+    
+    รายละเอียดราย Service และ Usage Type อยู่ในไฟล์แนบครับ
+    """
+    msg.set_content(body)
+
+    # แนบไฟล์ CSV
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+        msg.add_attachment(
+            file_data, 
+            maintype='application', 
+            subtype='octet-stream', 
+            filename=os.path.basename(file_path)
+        )
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(email_user, email_pass)
+            smtp.send_message(msg)
+        print("✅ Email sent successfully!")
+    except Exception as e:
+        print(f"❌ Email failed: {e}")
 
 def get_detailed_daily_cost():
-    # 1. Setup AWS Session
-    session = boto3.Session(profile_name=AWS_PROFILE)
-    ce = session.client('ce')
-    sts = session.client('sts')
+    # 1. Setup AWS Client (เปลี่ยนจาก Session เพื่อให้รันบน GitHub ได้)
+    ce = boto3.client('ce', region_name='us-east-1')
+    sts = boto3.client('sts')
     
-    account_id = sts.get_caller_identity()["Account"]
+    try:
+        account_id = sts.get_caller_identity()["Account"]
+    except Exception as e:
+        print(f"❌ AWS Auth Error: {e}")
+        return
 
-    # 2. กำหนดช่วงเวลา (เมื่อวาน)
+    # 2. กำหนดช่วงเวลา
     today = datetime.now()
     yesterday = today - timedelta(days=1)
-    
     start_date = yesterday.strftime('%Y-%m-%d')
     end_date = today.strftime('%Y-%m-%d')
     file_date_str = yesterday.strftime('%Y%m%d')
@@ -26,13 +74,8 @@ def get_detailed_daily_cost():
     print(f"Fetching DETAILED cost for Account: {account_id}, Date: {start_date}...")
 
     # 3. เรียก API AWS Cost Explorer
-    # ปรับ GroupBy: ใช้ SERVICE และ USAGE_TYPE (ละเอียดกว่า Region)
-    # หมายเหตุ: API อนุญาตให้ GroupBy ได้สูงสุด 2 Dimensions
     response = ce.get_cost_and_usage(
-        TimePeriod={
-            'Start': start_date,
-            'End': end_date
-        },
+        TimePeriod={'Start': start_date, 'End': end_date},
         Granularity='DAILY',
         Metrics=['UnblendedCost', 'AmortizedCost'], 
         GroupBy=[
@@ -43,88 +86,63 @@ def get_detailed_daily_cost():
 
     # 4. แปลงข้อมูล
     data_rows = []
+    total_unblended = 0.0
+    total_net = 0.0
+    currency = "USD"
     
     for result in response['ResultsByTime']:
-        report_date = result['TimePeriod']['Start']
-        
+        report_date_val = result['TimePeriod']['Start']
         for group in result['Groups']:
-            # Keys: [Service, UsageType]
             service_name = group['Keys'][0]
             usage_type = group['Keys'][1]
-            
-            # ดึงตัวเลข
-            unblended_cost = float(group['Metrics']['UnblendedCost']['Amount']) # ราคาตั้ง
-            net_cost = float(group['Metrics']['AmortizedCost']['Amount'])       # ราคาหลังหักส่วนลด/เกลี่ย
+            un_cost = float(group['Metrics']['UnblendedCost']['Amount'])
+            n_cost = float(group['Metrics']['AmortizedCost']['Amount'])
             unit = group['Metrics']['UnblendedCost']['Unit']
+            currency = unit
 
-            # --- LOGIC การกรอง 0 ตามที่คุณขอ ---
-            # 1. ถ้า Cost ตั้งต้นเป็น 0 และ Net Cost เป็น 0 -> ไม่แสดง (แปลว่าไม่มีการใช้งาน หรือไม่มีค่าใช้จ่ายเลย)
-            # 2. ถ้า Cost ตั้งต้น > 0 แต่ Net Cost = 0 (เช่น ใช้ Credit ฟรี) -> แสดง (Condition นี้จะผ่านบรรทัดล่าง)
-            # 3. ถ้า Cost ตั้งต้น = 0 แต่ Net Cost > 0 (Rare case: Tax adjustment) -> แสดง
-            
-            if unblended_cost == 0 and net_cost == 0:
+            if un_cost == 0 and n_cost == 0:
                 continue
 
-            # พยายามแกะ Region จาก Usage Type (เช่น 'APN1-BoxUsage' -> Region คือ APN1/Singapore)
-            # วิธีนี้ช่วยประหยัด Dimension Quota
+            total_unblended += un_cost
+            total_net += n_cost
+
+            # Logic แกะ Region แบบที่คุณเขียนไว้
             location_guess = "Global/Unknown"
             if "-" in usage_type:
                 prefix = usage_type.split("-")[0]
-                # Mapping คร่าวๆ (อาจไม่ครบทุก Region แต่ครอบคลุมตัวหลัก)
                 region_map = {
                     'APN1': 'ap-southeast-1 (Singapore)',
                     'APN2': 'ap-northeast-2 (Seoul)',
-                    'APS1': 'ap-southeast-1 (Singapore-Legacy)', # บางทีเจอ Code นี้
                     'USE1': 'us-east-1 (N. Virginia)',
                     'USW2': 'us-west-2 (Oregon)',
-                    'EU': 'Europe',
-                    # ถ้าไม่มี Prefix ที่รู้จัก มักจะเป็น Global Service เช่น IAM, Route53
+                    'EU': 'Europe'
                 }
-                location_guess = region_map.get(prefix, prefix) # ถ้าไม่เจอให้ใส่ Prefix เดิมไปก่อน
+                location_guess = region_map.get(prefix, prefix)
 
-            row = {
-                'report_date': report_date,
+            data_rows.append({
+                'report_date': report_date_val,
                 'AWS Account ID': account_id,
                 'Service': service_name,
-                'Usage Type': usage_type,     # *สำคัญมาก ดูตรงนี้จะรู้ว่าค่าอะไร
-                'Location (Est.)': location_guess,
-                'Cost (Unblended)': unblended_cost,
-                'Net Cost (Amortized)': net_cost,
+                'Usage Type': usage_type,
+                'Cost (Unblended)': un_cost,
+                'Net Cost (Amortized)': n_cost,
                 'currency': unit,
-                'service_name_duplicate': service_name, # เผื่ออยากคง Format เดิม
-                'resource_group': 'N/A'
-            }
-            data_rows.append(row)
+                'Location (Est.)': location_guess
+            })
 
-    # 5. Export CSV
+    # 5. Export และ ส่งเมล
     if data_rows:
         df = pd.DataFrame(data_rows)
-        
-        # จัดเรียง Column ให้อ่านง่ายแบบ Professional Report
-        columns_order = [
-            'report_date', 
-            'AWS Account ID', 
-            'Service', 
-            'Usage Type', 
-            'Cost (Unblended)', 
-            'Net Cost (Amortized)', 
-            'currency', 
-            'Location (Est.)',
-            'resource_group'
-        ]
-        
-        # เลือกเฉพาะ Column ที่มีใน list (ป้องกัน error)
-        valid_columns = [c for c in columns_order if c in df.columns]
-        df = df[valid_columns]
-        
         filename = f"{file_date_str}_{account_id}_dailycost.csv"
         file_path = os.path.join(OUTPUT_FOLDER, filename)
         
         df.to_csv(file_path, index=False)
-        print(f"Exported: {file_path}")
-        print(f"Total Rows: {len(df)}")
+        print(f"✅ Exported: {file_path}")
+        
+        # ส่งอีเมล
+        send_email(file_path, start_date, total_unblended, total_net, currency)
     else:
-        print("No cost data found (Check your date range or permissions).")
+        print("⚠️ No cost data found.")
 
 if __name__ == "__main__":
     get_detailed_daily_cost()
