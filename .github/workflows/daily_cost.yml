@@ -37,3 +37,16 @@ jobs:
         name: daily-cost-report
         path: "*.csv"
         retention-days: 14
+
+        - name: Send mail
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 465
+        username: ${{ secrets.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        subject: "Daily AWS Cost Report - ${{ github.run_id }}"
+        to: your-email@gmail.com # อีเมลผู้รับ
+        from: AWS Billing Bot
+        body: "รายงานค่าใช้จ่าย AWS ประจำวันตามไฟล์แนบครับ"
+        attachments: "*.csv" # จะดึงไฟล์ CSV ทั้งหมดในโฟลเดอร์ส่งไป
